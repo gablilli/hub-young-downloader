@@ -38,7 +38,7 @@ A tool that allows you to create an ofline backup of your books on HUB Young and
 
 Remember that you are responsible for what you are doing on the internet and even tho this script exists it might not be legal in your country to create personal backups of books.
 
-I may or may not update it depending on my needs tho I'm open to pullup requests ecc.
+I may or may not update it depending on my needs tho I'm open to pullup requests, please check [CONTRIBUTING](CONTRIBUTING.md).
 
 ## Licence
 
