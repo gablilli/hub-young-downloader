@@ -5,10 +5,9 @@ import PromptSync from "prompt-sync";
 
 const prompt = PromptSync({ sigint: true });
 
-// Chiedi all'utente token se non passato
 let token = process.argv[2];
-let pdfPath = process.argv[3];      // PDF di base da modificare
-let volumeId = process.argv[4];     // es: 5931034
+let pdfPath = process.argv[3];
+let volumeId = process.argv[4];
 
 if (!token) token = prompt("Insert your TOKEN_SESSION: ");
 if (!volumeId) volumeId = prompt("Insert volumeId: ");
