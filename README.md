@@ -1,5 +1,6 @@
 # hub-young-downloader
 A tool that allows you to create an ofline backup of your books on HUB Young and HUB Kids
+Now supports even annotations!
 
 ## Requirements
 
