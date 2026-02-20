@@ -1,151 +1,112 @@
-import Database from "better-sqlite3";
-import AdmZip from "adm-zip";
-import PDFMerger from "pdf-merger-js";
+import fs from "fs-extra";
 import fetch from "node-fetch";
-import fsExtra from "fs-extra";
-import fs from "fs/promises";
-import yargs from "yargs";
+import { PDFDocument, rgb } from "pdf-lib";
 import PromptSync from "prompt-sync";
 
 const prompt = PromptSync({ sigint: true });
 
-const argv = yargs(process.argv)
-    .option("platform", {
-        alias: "p",
-        description:
-            'Platform to download from, either "hubyoung" or "hubkids"',
-        type: "string",
-		choices: ["hubyoung", "hubkids"]
-    })
-    .option("volumeId", {
-        alias: "v",
-        description: "Volume ID of the book to download",
-        type: "string",
-    })
-    .option("token", {
-        alias: "t",
-        description: "Token of the user",
-        type: "string",
-    })
-    .option("file", {
-        alias: "f",
-        description: "The output file (defaults to book name)",
-        type: "string",
-    })
-	.option("noCleanUp", {
-		alias: "n",
-		description: "Don't clean up the temp folder after merging",
-		type: "boolean",
-		default: false
-	})
-    .help()
-    .alias("help", "h").argv;
+// Chiedi all'utente token se non passato
+let token = process.argv[2];
+let pdfPath = process.argv[3];      // PDF di base da modificare
+let volumeId = process.argv[4];     // es: 5931034
 
+if (!token) token = prompt("Insert your TOKEN_SESSION: ");
+if (!volumeId) volumeId = prompt("Insert volumeId: ");
+if (!pdfPath) pdfPath = prompt("Insert PDF path (existing PDF): ");
 
+if (!fs.existsSync(pdfPath)) {
+  console.error("PDF path not found:", pdfPath);
+  process.exit(1);
+}
 
-(async () => {
-	await fsExtra.ensureDir("temp");
+async function main() {
+  console.log("Loading base PDF...");
+  const baseBytes = await fs.readFile(pdfPath);
+  const pdfDoc = await PDFDocument.load(baseBytes);
+  const pages = pdfDoc.getPages();
 
-	// make sure folder is empty
-	await fs.readdir("temp").then(async files => {
-		for (const file of files) {
-			await fsExtra.remove(`temp/${file}`);
-		}
-	});
+  console.log("Fetching publication metadata...");
+  const pubRes = await fetch(
+    `https://ms-api.hubscuola.it/meyoung/publication/${volumeId}`,
+    {
+      headers: {
+        "Token-Session": token,
+        "Content-Type": "application/json",
+      },
+    }
+  );
 
-    let platform = argv.platform;
+  if (!pubRes.ok) {
+    console.error("Failed fetching publication metadata:", pubRes.status);
+    process.exit(1);
+  }
 
-    while (!platform) {
-        platform = prompt(
-            "Input the platform (either 'hubyoung' or 'hubkids'): "
-        );
-        if (platform !== "hubyoung" && platform !== "hubkids") {
-            console.log(
-                "Invalid platform, please input either 'hubyoung' or 'hubkids'"
-            );
-            platform = null;
+  const publication = await pubRes.json();
+  const pagesId = publication.pagesId || [];
+  console.log("Total pagesId:", pagesId.length);
+
+  let totalInks = 0;
+
+  for (const pageId of pagesId) {
+    console.log("Fetching annotations for pageId:", pageId);
+
+    const annRes = await fetch(
+      `https://ms-api.hubscuola.it/social/volume/${volumeId}/${pageId}?withComments=true&types=ink`,
+      {
+        headers: {
+          "Token-Session": token,
+          "Content-Type": "application/json",
+        },
+      }
+    );
+
+    if (!annRes.ok) continue;
+
+    const annJson = await annRes.json();
+    const inks = annJson.ink || [];
+    totalInks += inks.length;
+
+    for (const ink of inks) {
+      let data;
+      try {
+        data = JSON.parse(ink.data);
+      } catch {
+        continue;
+      }
+
+      const pageIndex = data.pageIndex;
+      const page = pages[pageIndex];
+      if (!page) continue;
+
+      const { height } = page.getSize();
+      const colorHex = data.strokeColor || "#000000";
+      const r = parseInt(colorHex.slice(1, 3), 16) / 255;
+      const g = parseInt(colorHex.slice(3, 5), 16) / 255;
+      const b = parseInt(colorHex.slice(5, 7), 16) / 255;
+
+      for (const line of data.lines?.points || []) {
+        for (let i = 0; i < line.length - 1; i++) {
+          const [x1, y1] = line[i];
+          const [x2, y2] = line[i + 1];
+
+          page.drawLine({
+            start: { x: x1, y: height - y1 },
+            end: { x: x2, y: height - y2 },
+            thickness: data.lineWidth || 2,
+            color: rgb(r, g, b),
+            opacity: data.opacity ?? 1,
+          });
         }
+      }
     }
-    platform = platform === "hubyoung" ? "young" : "kids";
+  }
 
-    let volumeId = argv.volumeId;
-    while (!volumeId) volumeId = prompt("Input the volume ID: ");
+  console.log("Total ink annotations applied:", totalInks);
 
-    let token = argv.token;
-    while (!token) token = prompt("Input the token: ");
+  const finalBytes = await pdfDoc.save();
+  await fs.writeFile(pdfPath, finalBytes);
 
-	console.log("Fetching book info...");
+  console.log("DONE. Annotated PDF saved:", pdfPath);
+}
 
-	let title;
-
-    let response = await fetch("https://ms-api.hubscuola.it/me" + platform + "/publication/" + volumeId, { method: "GET", headers: { "Token-Session": token, "Content-Type": "application/json" } });
-    const code = response.status;
-    if (code === 500) {
-        console.log("Volume ID not valid");
-    } else if (code === 401) {
-        console.log("Token Session not valid, you may have copied it wrong or you don't own this book.");
-    } else {
-        let result = await response.json();
-        title = result.title;
-        console.log(`Downloading "${title}"...`);
-    }
-
-	console.log("Downloading chapter...");
-
-	var res = await fetch(
-		`https://ms-mms.hubscuola.it/downloadPackage/${volumeId}/publication.zip?tokenId=${token}`,
-		{ headers: { "Token-Session": token } }
-	);
-	if (res.status !== 200) {
-		console.error("API error:", res.status);
-		reject(res.status);
-	}
-
-	console.log("Extracting...");
-
-    const zip = new AdmZip(Buffer.from(await res.arrayBuffer()));
-    await zip.extractAllTo("temp/extracted-files");
-
-	console.log("Reading chapter list...");
-
-	let db = new Database(
-		"./temp/extracted-files/publication/publication.db",
-		{
-            readonly: true,
-        }
-	);
-
-    let chapters = JSON.parse(db.prepare("SELECT offline_value FROM offline_tbl WHERE offline_path=?").get(`me${platform}/publication/${volumeId}`).offline_value).indexContents.chapters;
-
-	db.close();
-
-	console.log("Downloading pages...")
-
-	for (const chapter of chapters) {
-        const url = `https://ms-mms.hubscuola.it/public/${volumeId}/${chapter.chapterId}.zip?tokenId=${token}&app=v2`;
-        var res = await fetch(url, {
-            headers: { "Token-Session": token },
-        }).then((res) => res.arrayBuffer());
-        const zip = new AdmZip(Buffer.from(res));
-        await zip.extractAllTo(`temp/build`);
-    }
-
-	console.log("Merging pages...");
-
-	const merger = new PDFMerger();
-    for (const chapter of chapters) {
-        let base = `./temp/build/${chapter.chapterId}`;
-        const files = fsExtra.readdirSync(base);
-        for (const file of files) {
-            if (file.includes(".pdf")) {
-                await merger.add(`${base}/${file}`);
-            }
-        }
-    }
-    merger.save(argv.file || `${title}.pdf`);
-
-    if (!argv.noCleanUp) fsExtra.removeSync("temp");
-
-    console.log("Book saved");
-
-})();
+main();
